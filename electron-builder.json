@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.bamo.router",
+  "productName": "Bamo Router",
+  "copyright": "Copyright © ${author}",
+  "directories": {
+    "output": "release",
+    "buildResources": "electron/assets"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "dist/bamo-router/browser/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "electron/assets",
+      "to": "assets",
+      "filter": ["icon.ico", "icon.png"]
+    }
+  ],
+  "asar": true,
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "electron/assets/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}
