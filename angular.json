@@ -11,7 +11,7 @@
       "schematics": {},
       "root": "",
       "sourceRoot": "src",
-      "prefix": "app",
+      "prefix": "bamo",
       "architect": {
         "build": {
           "builder": "@angular/build:application",
@@ -30,6 +30,7 @@
           },
           "configurations": {
             "production": {
+              "baseHref": "./",
               "budgets": [
                 {
                   "type": "initial",
@@ -38,8 +39,8 @@
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "4kB",
-                  "maximumError": "8kB"
+                  "maximumWarning": "10kB",
+                  "maximumError": "16kB"
                 }
               ],
               "outputHashing": "all"

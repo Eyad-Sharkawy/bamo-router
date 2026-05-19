@@ -1,59 +1,123 @@
-# BamoRouter
+# Bamo Router
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.2.3.
+Desktop app for managing a Huawei home router from Windows. Built with **Angular** (UI) and **Electron** (desktop shell + router API).
 
-## Development server
+## Features
 
-To start a local development server, run:
+- **Sign in** with your router admin username and password
+- **Devices** — view connected clients, block or unblock internet per device
+- **Wi‑Fi** — view and edit SSIDs, passwords, broadcast, and hidden-network settings
+- **System** — reboot the router (with confirmation)
 
-```bash
-ng serve
-```
+The app talks to the router over your local network (default gateway `https://192.168.100.1`).
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## Requirements
 
-## Code scaffolding
+- **Node.js** 20+ and npm
+- **Windows** (installer build targets Windows x64)
+- PC on the same network as the router
+- Router admin credentials
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
-
-```bash
-ng generate component component-name
-```
-
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+## Quick start (development)
 
 ```bash
-ng generate --help
+npm install
+npm run dev
 ```
 
-## Building
+This starts the Angular dev server, compiles the Electron main process, and opens the desktop window. Sign in with your router credentials.
 
-To build the project run:
+> Router features only work inside Electron (`npm run dev` or the packaged app), not in the browser alone.
 
-```bash
-ng build
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Dev mode: Angular + Electron with hot reload |
+| `npm run build:web` | Production Angular build → `dist/bamo-router/` |
+| `npm run build:electron` | Compile Electron TypeScript → `dist-electron/` |
+| `npm run build:app` | Build web + Electron (no installer) |
+| `npm run dist:win` | Full Windows installer → `release/` |
+| `npm test` | Unit tests (Vitest) |
+
+## Build & ship (Windows)
+
+1. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+2. Ensure icons exist in `electron/assets/`:
+   - `icon.png` — square, at least **256×256** (used in the UI and to generate `.ico`)
+   - `icon.ico` — required for the `.exe` / installer (must include 256×256)
+
+   Regenerate `.ico` from PNG:
+
+   ```bash
+   npm run build:icon
+   ```
+
+   Uses `icon-square.png` or `icon.png` via `scripts/generate-icon.mjs`.
+
+3. Build the installer:
+
+   ```bash
+   npm run dist:win
+   ```
+
+4. Output:
+   - **Installer:** `release/Bamo Router Setup 1.0.0.exe` — distribute this
+   - **Portable:** `release/win-unpacked/` — run `Bamo Router.exe` without installing
+
+Bump the version in `package.json` before each release; the installer name follows that version.
+
+## App icon
+
+| Location | Purpose |
+|----------|---------|
+| `electron/assets/icon.ico` | Windows app, taskbar, installer |
+| `electron/assets/icon.png` | UI + fallback |
+| `public/icon.png` | Login screen and header in the Angular UI |
+
+After changing icons, run `npm run build:icon` (if needed), then `npm run dist:win` for a new installer.
+
+## Project structure
+
+```
+bamo-router/
+├── electron/           # Main process (router HTTP API, IPC)
+│   ├── main.ts
+│   ├── preload.ts
+│   └── assets/         # App icons
+├── src/app/            # Angular UI
+├── public/             # Static assets (icon.png)
+├── scripts/            # Icon generation helpers
+├── dist-electron/      # Compiled Electron (generated)
+├── dist/bamo-router/   # Compiled Angular (generated)
+└── release/            # Packaged installers (generated)
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+## How it works
 
-## Running unit tests
+1. The **renderer** (Angular) calls `window.routerAPI` exposed by `electron/preload.ts`.
+2. The **main process** (`electron/main.ts`) performs HTTPS requests to the router with cookie/session handling.
+3. Login, devices, firewall rules, Wi‑Fi, and reboot map to the router’s web interface endpoints.
 
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
+The default router URL is set in `electron/main.ts` (`https://192.168.100.1`). Change it there if your gateway uses a different address.
 
-```bash
-ng test
-```
+## Security notes
 
-## Running end-to-end tests
+- Credentials are sent only to your local router; they are not stored in the app after sign-out (session cookies are cleared on logout).
+- The main process disables TLS certificate verification for the router’s self-signed HTTPS certificate (`NODE_TLS_REJECT_UNAUTHORIZED`). This is required for many ISP routers but means you should only use the app on a trusted home network.
 
-For end-to-end (e2e) testing, run:
+## Tech stack
 
-```bash
-ng e2e
-```
+- Angular 21
+- Electron 42
+- electron-builder (Windows NSIS installer)
+- axios + tough-cookie (router session)
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
+## License
 
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+Private — see repository owner for terms.

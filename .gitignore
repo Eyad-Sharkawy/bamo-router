@@ -1,17 +1,48 @@
-# See https://docs.github.com/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
+# See https://docs.github.com/get-started/getting-started-with-git/ignoring-files
 
-# Compiled output
+# --- Build outputs ---
 /dist
-/tmp
+/dist-electron
 /out-tsc
+/tmp
 /bazel-out
 
-# Node
-/node_modules
-npm-debug.log
-yarn-error.log
+# Angular
+/.angular/cache
 
-# IDEs and editors
+# Electron / installer packaging
+/release
+/release-build
+/release.stale.*
+.electron-output-dir
+*.blockmap
+builder-debug.yml
+
+# --- Dependencies ---
+/node_modules
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Logs ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Test & coverage ---
+/coverage
+__screenshots__/
+/libpeerconnection.log
+testem.log
+/connect.lock
+
+# --- IDEs & editors ---
 .idea/
 .project
 .classpath
@@ -19,6 +50,7 @@ yarn-error.log
 *.launch
 .settings/
 *.sublime-workspace
+.history/
 
 # Visual Studio Code
 .vscode/*
@@ -27,18 +59,16 @@ yarn-error.log
 !.vscode/launch.json
 !.vscode/extensions.json
 !.vscode/mcp.json
-.history/*
 
-# Miscellaneous
-/.angular/cache
-.sass-cache/
-/connect.lock
-/coverage
-/libpeerconnection.log
-testem.log
-/typings
-__screenshots__/
-
-# System files
+# --- OS ---
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Misc ---
+.sass-cache/
+/typings
+
+# Generated icon helper (source PNG/ICO in electron/assets/ are kept)
+electron/assets/icon-square.png
