@@ -4,12 +4,12 @@ Desktop app for managing a Huawei home router from Windows. Built with **Angular
 
 ## Features
 
-- **Sign in** with your router admin username and password
+- **Sign in** with your router URL, admin username, and password
 - **Devices** — view connected clients, block or unblock internet per device
 - **Wi‑Fi** — view and edit SSIDs, passwords, broadcast, and hidden-network settings
 - **System** — reboot the router (with confirmation)
 
-The app talks to the router over your local network (default gateway `https://192.168.100.1`).
+The app talks to the router over your local network. Set the router URL on the sign-in screen (default `https://192.168.100.1`); it is remembered for next time.
 
 ## Requirements
 
@@ -104,11 +104,11 @@ bamo-router/
 2. The **main process** (`electron/main.ts`) performs HTTPS requests to the router with cookie/session handling.
 3. Login, devices, firewall rules, Wi‑Fi, and reboot map to the router’s web interface endpoints.
 
-The default router URL is set in `electron/main.ts` (`https://192.168.100.1`). Change it there if your gateway uses a different address.
+The router URL is configured on the sign-in screen and stored in the app’s local storage. The main process uses that base URL for all router API calls.
 
 ## Security notes
 
-- Credentials are sent only to your local router; they are not stored in the app after sign-out (session cookies are cleared on logout).
+- Credentials are sent only to your local router. With **Remember** enabled, the sign-in URL, username, and password are stored on your PC using **OS encryption** when available (Windows/macOS); otherwise they are stored locally in the app data folder. Uncheck **Remember** to avoid saving them. Router session cookies are cleared on sign-out.
 - The main process disables TLS certificate verification for the router’s self-signed HTTPS certificate (`NODE_TLS_REJECT_UNAUTHORIZED`). This is required for many ISP routers but means you should only use the app on a trusted home network.
 
 ## Tech stack

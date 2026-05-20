@@ -1,7 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('routerAPI', {
-  login: (credentials: any) => ipcRenderer.invoke('router:login', credentials),
+  getBaseUrl: () => ipcRenderer.invoke('router:getBaseUrl'),
+  setBaseUrl: (url: string) => ipcRenderer.invoke('router:setBaseUrl', url),
+  loadSavedLogin: () => ipcRenderer.invoke('router:loadSavedLogin'),
+  saveSavedLogin: (data: {
+    routerUrl: string;
+    user: string;
+    pass: string;
+    remember: boolean;
+  }) => ipcRenderer.invoke('router:saveSavedLogin', data),
+  clearSavedLogin: () => ipcRenderer.invoke('router:clearSavedLogin'),
+  login: (credentials: { user: string; pass: string; routerUrl?: string }) =>
+    ipcRenderer.invoke('router:login', credentials),
   logout: () => ipcRenderer.invoke('router:logout'),
   getDevices: () => ipcRenderer.invoke('router:getDevices'),
   blockDevice: (payload: {
