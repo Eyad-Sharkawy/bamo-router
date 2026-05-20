@@ -44,6 +44,8 @@ testem.log
 /connect.lock
 
 # --- IDEs & editors ---
+.vscode/
+.cursor/
 .idea/
 .project
 .classpath
