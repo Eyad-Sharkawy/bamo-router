@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, inject, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 
@@ -42,7 +42,13 @@ type RouterApiResult = {
 declare global {
   interface Window {
     routerAPI: {
-      login: (credentials: { user: string; pass: string }) => Promise<RouterApiResult>;
+      getBaseUrl: () => Promise<{ url: string }>;
+      setBaseUrl: (url: string) => Promise<RouterApiResult & { url?: string }>;
+      login: (credentials: {
+        user: string;
+        pass: string;
+        routerUrl?: string;
+      }) => Promise<RouterApiResult>;
       logout: () => Promise<{ success: boolean }>;
       getDevices: () => Promise<RouterApiResult & { data?: any[] }>;
       getBlockedDevices: () => Promise<RouterApiResult & { data?: BlockedDevicesData }>;
@@ -64,6 +70,28 @@ declare global {
       restartRouter: () => Promise<RouterApiResult>;
       getWifiPasswords: () => Promise<RouterApiResult & { data?: any[] }>;
       saveWifiSettings: (networks: any[]) => Promise<RouterApiResult>;
+      loadSavedLogin: () => Promise<{
+        routerUrl: string;
+        user: string;
+        pass: string;
+        remember: boolean;
+        encryptionAvailable: boolean;
+        encryptionUsed: boolean;
+      }>;
+      saveSavedLogin: (data: {
+        routerUrl: string;
+        user: string;
+        pass: string;
+        remember: boolean;
+      }) => Promise<{
+        routerUrl: string;
+        user: string;
+        pass: string;
+        remember: boolean;
+        encryptionAvailable: boolean;
+        encryptionUsed: boolean;
+      }>;
+      clearSavedLogin: () => Promise<{ success: boolean }>;
     };
   }
 }
@@ -85,10 +113,19 @@ const BLOCK_METHOD_OPTIONS: { value: BlockMethod; label: string }[] = [
   templateUrl: './app.html',
   styleUrl: './app.css',
 })
-export class App {
+export class App implements OnInit {
   private readonly fb = inject(FormBuilder);
 
+  private static readonly LOGIN_STORAGE_KEY = 'bamo-router.login';
+  /** @deprecated Migrated into {@link App.LOGIN_STORAGE_KEY}. */
+  private static readonly ROUTER_URL_STORAGE_KEY = 'bamo-router.baseUrl';
+  static readonly DEFAULT_ROUTER_URL = 'https://192.168.100.1';
+
+  rememberLogin = signal(true);
+  credentialsEncrypted = signal(false);
+
   isAuthenticated = signal(false);
+  routerBaseUrl = signal(App.DEFAULT_ROUTER_URL);
   currentUser = signal('');
   isLoggingIn = signal(false);
   loginError = signal('');
@@ -107,10 +144,145 @@ export class App {
     wifiMacPolicy: 0,
   });
 
-  loginForm = this.fb.nonNullable.group({
-    user: ['', [Validators.required]],
-    pass: ['', [Validators.required]],
-  });
+  loginForm = this.createLoginForm();
+
+  private createLoginForm() {
+    return this.fb.nonNullable.group({
+      routerUrl: [App.DEFAULT_ROUTER_URL, [Validators.required]],
+      user: ['', [Validators.required]],
+      pass: ['', [Validators.required]],
+    });
+  }
+
+  private loadLegacyLocalStorageLogin(): {
+    routerUrl: string;
+    user: string;
+    pass: string;
+    remember: boolean;
+  } {
+    const defaults = {
+      routerUrl: App.DEFAULT_ROUTER_URL,
+      user: '',
+      pass: '',
+      remember: true,
+    };
+    if (typeof localStorage === 'undefined') return defaults;
+
+    try {
+      const raw = localStorage.getItem(App.LOGIN_STORAGE_KEY);
+      if (!raw) {
+        const legacyUrl = localStorage.getItem(App.ROUTER_URL_STORAGE_KEY);
+        if (legacyUrl) return { ...defaults, routerUrl: legacyUrl };
+        return defaults;
+      }
+      const parsed = JSON.parse(raw) as Partial<{
+        routerUrl: string;
+        user: string;
+        pass: string;
+        remember: boolean;
+      }>;
+      return {
+        routerUrl: parsed.routerUrl?.trim() || defaults.routerUrl,
+        user: parsed.user ?? '',
+        pass: parsed.pass ?? '',
+        remember: parsed.remember !== false,
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  private clearLegacyLocalStorageLogin() {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.removeItem(App.LOGIN_STORAGE_KEY);
+    localStorage.removeItem(App.ROUTER_URL_STORAGE_KEY);
+  }
+
+  private async migrateLegacyLocalStorageLogin() {
+    if (!this.isElectron || typeof localStorage === 'undefined') return;
+    const raw = localStorage.getItem(App.LOGIN_STORAGE_KEY);
+    const legacyUrl = localStorage.getItem(App.ROUTER_URL_STORAGE_KEY);
+    if (!raw && !legacyUrl) return;
+
+    const legacy = this.loadLegacyLocalStorageLogin();
+    if (!raw && !legacyUrl) return;
+
+    await window.routerAPI.saveSavedLogin({
+      routerUrl: legacy.routerUrl,
+      user: legacy.user,
+      pass: legacy.pass,
+      remember: legacy.remember,
+    });
+    this.clearLegacyLocalStorageLogin();
+  }
+
+  private async applySavedLoginToForm() {
+    let saved = {
+      routerUrl: App.DEFAULT_ROUTER_URL,
+      user: '',
+      pass: '',
+      remember: true,
+      encryptionAvailable: false,
+      encryptionUsed: false,
+    };
+
+    if (this.isElectron) {
+      await this.migrateLegacyLocalStorageLogin();
+      saved = await window.routerAPI.loadSavedLogin();
+    } else {
+      const legacy = this.loadLegacyLocalStorageLogin();
+      saved = { ...saved, ...legacy, encryptionAvailable: false, encryptionUsed: false };
+    }
+
+    this.rememberLogin.set(saved.remember);
+    this.credentialsEncrypted.set(saved.encryptionUsed);
+
+    const routerUrl = saved.remember
+      ? saved.routerUrl
+      : saved.routerUrl || App.DEFAULT_ROUTER_URL;
+
+    this.loginForm.reset({
+      routerUrl,
+      user: saved.remember ? saved.user : '',
+      pass: saved.remember ? saved.pass : '',
+    });
+    this.routerBaseUrl.set(routerUrl);
+
+    if (this.isElectron) {
+      void window.routerAPI.setBaseUrl(routerUrl);
+    }
+  }
+
+  private async persistLogin(routerUrl: string, user: string, pass: string) {
+    const remember = this.rememberLogin();
+
+    if (this.isElectron) {
+      const result = await window.routerAPI.saveSavedLogin({
+        routerUrl,
+        user,
+        pass,
+        remember,
+      });
+      this.credentialsEncrypted.set(result.encryptionUsed);
+      this.clearLegacyLocalStorageLogin();
+      return;
+    }
+
+    if (remember) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(
+          App.LOGIN_STORAGE_KEY,
+          JSON.stringify({ routerUrl, user, pass, remember: true }),
+        );
+      }
+    } else {
+      this.clearLegacyLocalStorageLogin();
+    }
+  }
+
+  ngOnInit() {
+    void this.applySavedLoginToForm();
+  }
 
   get isElectron(): boolean {
     return typeof window !== 'undefined' && !!window.routerAPI;
@@ -146,7 +318,7 @@ export class App {
     this.loginError.set('');
     this.activeTab.set('devices');
     this.blockMethod.set('ipv4');
-    this.loginForm.reset({ user: '', pass: '' });
+    void this.applySavedLoginToForm();
   }
 
   async onLoginSubmit() {
@@ -158,11 +330,26 @@ export class App {
       return;
     }
 
-    const { user, pass } = this.loginForm.getRawValue();
+    const { user, pass, routerUrl } = this.loginForm.getRawValue();
+    const trimmedUrl = routerUrl.trim();
     this.isLoggingIn.set(true);
     this.loginError.set('');
 
-    const res = await window.routerAPI.login({ user, pass });
+    await this.persistLogin(trimmedUrl, user, pass);
+
+    const urlRes = await window.routerAPI.setBaseUrl(trimmedUrl);
+    if (!urlRes.success) {
+      this.isLoggingIn.set(false);
+      this.loginError.set(urlRes.message ?? 'Invalid router URL.');
+      return;
+    }
+    if (urlRes.url) {
+      this.routerBaseUrl.set(urlRes.url);
+      this.loginForm.patchValue({ routerUrl: urlRes.url });
+      await this.persistLogin(urlRes.url, user, pass);
+    }
+
+    const res = await window.routerAPI.login({ user, pass, routerUrl: trimmedUrl });
 
     this.isLoggingIn.set(false);
 
@@ -173,7 +360,14 @@ export class App {
 
     this.currentUser.set(user);
     this.isAuthenticated.set(true);
-    this.loginForm.reset({ user: '', pass: '' });
+    const routerUrlSaved = urlRes.url ?? trimmedUrl;
+    await this.persistLogin(routerUrlSaved, user, pass);
+    const remember = this.rememberLogin();
+    this.loginForm.reset({
+      routerUrl: routerUrlSaved,
+      user: remember ? user : '',
+      pass: remember ? pass : '',
+    });
     this.statusMessage.set('Connected to your router.');
     await this.fetchDevices();
     if (!this.isAuthenticated()) {

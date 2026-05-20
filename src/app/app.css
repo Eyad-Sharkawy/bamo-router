@@ -137,6 +137,33 @@
   color: #fca5a5;
 }
 
+.field-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.login-remember-hint {
+  margin: 0.25rem 0 0;
+}
+
+.field-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.field-checkbox input {
+  margin-top: 0.2rem;
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .field-compact {
   margin-top: 0.5rem;
 }

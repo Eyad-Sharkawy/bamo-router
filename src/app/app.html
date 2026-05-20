@@ -14,6 +14,24 @@
 
         <form class="login-form" [formGroup]="loginForm" (ngSubmit)="onLoginSubmit()">
           <label class="field">
+            <span>Router URL</span>
+            <input
+              type="url"
+              formControlName="routerUrl"
+              autocomplete="url"
+              placeholder="https://192.168.100.1"
+              spellcheck="false"
+              [class.field-invalid]="
+                loginForm.controls.routerUrl.touched && loginForm.controls.routerUrl.invalid
+              "
+            />
+            @if (loginForm.controls.routerUrl.touched && loginForm.controls.routerUrl.invalid) {
+              <span class="field-error">Router URL is required</span>
+            }
+            <span class="field-hint">Your router admin page address (https://…)</span>
+          </label>
+
+          <label class="field">
             <span>Username</span>
             <input
               type="text"
@@ -51,6 +69,27 @@
             </p>
           }
 
+          <label class="field-checkbox">
+            <input
+              type="checkbox"
+              [checked]="rememberLogin()"
+              (change)="rememberLogin.set($any($event.target).checked)"
+            />
+            <span>Remember URL, username, and password</span>
+          </label>
+
+          @if (rememberLogin()) {
+            <p class="field-hint login-remember-hint">
+              @if (credentialsEncrypted()) {
+                Credentials are stored on this device using OS encryption.
+              } @else if (isElectron) {
+                Credentials are saved on this device (OS encryption is not available on this system).
+              } @else {
+                Credentials are saved in browser storage (desktop app recommended).
+              }
+            </p>
+          }
+
           <button type="submit" class="btn btn-primary btn-block" [disabled]="isLoggingIn() || !isElectron">
             @if (isLoggingIn()) {
               <span class="spinner" aria-hidden="true"></span>
@@ -73,7 +112,7 @@
         </div>
 
         <div class="topbar-actions">
-          <span class="user-chip">
+          <span class="user-chip" [title]="routerBaseUrl()">
             <span class="user-dot" aria-hidden="true"></span>
             {{ currentUser() }}
           </span>
