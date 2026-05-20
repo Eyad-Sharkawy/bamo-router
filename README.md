@@ -67,7 +67,7 @@ This starts the Angular dev server, compiles the Electron main process, and open
    ```
 
 4. Output:
-   - **Installer:** `release/Bamo Router Setup 1.0.0.exe` — distribute this
+   - **Installer:** `release/Bamo Router Setup 2.0.0.exe` — distribute this
    - **Portable:** `release/win-unpacked/` — run `Bamo Router.exe` without installing
 
 Bump the version in `package.json` before each release; the installer name follows that version.

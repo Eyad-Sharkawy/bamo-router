@@ -1,6 +1,6 @@
 {
   "name": "bamo-router",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Desktop app to manage your Bamo home router",
   "author": "Bamo",
   "main": "dist-electron/main.js",

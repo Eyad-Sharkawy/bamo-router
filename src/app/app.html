@@ -88,7 +88,7 @@
           [class.tab-active]="activeTab() === 'devices'"
           (click)="setTab('devices')"
         >
-          Devices
+          Connected devices
           @if (devices().length > 0) {
             <span class="tab-badge">{{ devices().length }}</span>
           }
@@ -121,48 +121,92 @@
             <div class="panel-header">
               <div>
                 <h2>Connected devices</h2>
-                <p class="panel-desc">View and block internet access per device</p>
+                <p class="panel-desc">{{ blockPanelDesc(blockTab()) }}</p>
               </div>
-              <button type="button" class="btn btn-secondary" (click)="fetchDevices()" [disabled]="isBusy()">
-                Refresh
-              </button>
+              <div class="panel-header-actions">
+                <label class="filter-mode-field">
+                  <span>Filter by</span>
+                  <select
+                    class="filter-mode-select"
+                    [value]="blockMethod()"
+                    (change)="setBlockMethod($any($event.target).value)"
+                    [disabled]="isBusy()"
+                  >
+                    @for (opt of blockMethodOptions; track opt.value) {
+                      <option [value]="opt.value">{{ opt.label }}</option>
+                    }
+                  </select>
+                </label>
+                <div class="filter-setting-inline">
+                  <div>
+                    <span class="filter-setting-name">{{ filterSettingName(blockTab()) }}</span>
+                    <span
+                      class="filter-setting-hint"
+                      [class.filter-setting-off]="!isFilterEnabled(blockTab())"
+                    >
+                      {{ filterHint(blockTab()) }}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    class="toggle"
+                    [class.toggle-on]="isFilterEnabled(blockTab())"
+                    (click)="toggleFilterEnabled(blockTab())"
+                    [disabled]="isBusy()"
+                    [attr.aria-pressed]="isFilterEnabled(blockTab())"
+                  >
+                    {{ isFilterEnabled(blockTab()) ? 'On' : 'Off' }}
+                  </button>
+                </div>
+                <button type="button" class="btn btn-secondary" (click)="fetchDevices()" [disabled]="isBusy()">
+                  Refresh
+                </button>
+              </div>
             </div>
 
-            @if (devices().length === 0 && !isBusy()) {
+            @if (devicesForTab(blockTab()).length === 0 && !isBusy()) {
               <div class="empty-state">
                 <p>No devices loaded yet.</p>
                 <button type="button" class="btn btn-primary" (click)="fetchDevices()">Load devices</button>
               </div>
             } @else {
               <div class="card-grid">
-                @for (device of devices(); track device.mac) {
-                  <article class="device-card" [class.device-blocked]="device.blockRuleId">
+                @for (device of devicesForTab(blockTab()); track deviceTrackId(device)) {
+                  <article class="device-card" [class.device-blocked]="isBlockedByMethod(device, blockTab())">
                     <header class="device-card-head">
                       <h3>{{ device.hostname }}</h3>
-                      <span
-                        class="status-pill"
-                        [class.status-online]="isDeviceOnline(device.status)"
-                        [class.status-offline]="!isDeviceOnline(device.status)"
-                      >
-                        {{ isDeviceOnline(device.status) ? 'Online' : 'Offline' }}
-                      </span>
+                      @if (!device.isConnected) {
+                        <span class="status-pill status-offline">Not connected</span>
+                      } @else {
+                        <span
+                          class="status-pill"
+                          [class.status-online]="isDeviceOnline(device.status)"
+                          [class.status-offline]="!isDeviceOnline(device.status)"
+                        >
+                          {{ isDeviceOnline(device.status) ? 'Online' : 'Offline' }}
+                        </span>
+                      }
                     </header>
                     <div class="device-meta">
                       <div><span>IP</span><span>{{ device.ip }}</span></div>
                       <div><span>MAC</span><span class="mono">{{ device.mac }}</span></div>
                       <div><span>Link</span><span>{{ device.connection || '—' }}</span></div>
+                      @if (blockTab() === 'wifiMac' && device.wifiSsidName) {
+                        <div><span>SSID</span><span class="mono">{{ device.wifiSsidName }}</span></div>
+                      }
                     </div>
-                    @if (device.blockRuleId) {
-                      <p class="blocked-label">Internet blocked</p>
+                    @if (isBlockedByMethod(device, blockTab())) {
+                      <p class="blocked-label">{{ blockedRuleLabel(blockTab()) }}</p>
                     }
                     <button
                       type="button"
                       class="btn btn-block"
-                      [class.btn-success]="device.blockRuleId"
-                      [class.btn-danger]="!device.blockRuleId"
-                      (click)="toggleBlockStatus(device)"
+                      [class.btn-success]="isBlockedByMethod(device, blockTab())"
+                      [class.btn-danger]="!isBlockedByMethod(device, blockTab())"
+                      [disabled]="!canBlockDevice(device, blockTab()) && !isBlockedByMethod(device, blockTab())"
+                      (click)="toggleBlockStatus(device, blockTab())"
                     >
-                      {{ device.blockRuleId ? 'Unblock internet' : 'Block internet' }}
+                      {{ blockActionLabel(device, blockTab()) }}
                     </button>
                   </article>
                 }

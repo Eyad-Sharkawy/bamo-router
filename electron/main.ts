@@ -17,6 +17,74 @@ function resetRouterSession() {
   client = wrapper(axios.create({ jar, withCredentials: true, timeout: 5000 }));
 }
 
+const ROUTER_IP = 'https://192.168.100.1';
+const SESSION_PROBE_URL = `${ROUTER_IP}/html/bbsp/common/GetLanUserDevInfo.asp`;
+
+function responseBodyAsString(data: unknown): string {
+  return typeof data === 'string' ? data : String(data ?? '');
+}
+
+function looksLikeLoginPage(html: string): boolean {
+  if (!html) return true;
+  const lower = html.toLowerCase();
+  if (lower.includes('logfail')) return true;
+  if (lower.includes('login failed')) return true;
+  if (lower.includes('invalid password') || lower.includes('invalid username')) return true;
+  if (lower.includes('authentication failed')) return true;
+  const hasLoginForm =
+    (lower.includes('name="username"') || lower.includes('id="username"')) &&
+    (lower.includes('name="password"') || lower.includes('type="password"'));
+  const hasAuthedPayload = html.includes('USERDevice') || html.includes('hwonttoken');
+  return hasLoginForm && !hasAuthedPayload;
+}
+
+function looksLikeAuthenticatedSession(html: string): boolean {
+  if (!html || html.length < 10) return false;
+  if (looksLikeLoginPage(html)) return false;
+  return html.includes('USERDevice');
+}
+
+async function verifyRouterSession(): Promise<boolean> {
+  try {
+    const res = await client.post(SESSION_PROBE_URL);
+    if (looksLikeAuthenticatedSession(responseBodyAsString(res.data))) {
+      return true;
+    }
+    const page = await client.get(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp`);
+    const pageHtml = responseBodyAsString(page.data);
+    return pageHtml.includes('hwonttoken') && !looksLikeLoginPage(pageHtml);
+  } catch {
+    return false;
+  }
+}
+
+function notAuthenticatedResponse() {
+  return {
+    success: false as const,
+    message: 'Not signed in to the router. Please sign in again.',
+    sessionExpired: true as const,
+  };
+}
+
+async function ensureRouterSession() {
+  return (await verifyRouterSession()) ? null : notAuthenticatedResponse();
+}
+
+function decodeHexEscapes(value: string): string {
+  return value.replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function normalizeMac(mac: string): string {
+  const hex = mac.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+  if (hex.length !== 12) return mac.toUpperCase();
+  return hex.match(/.{2}/g)!.join(':');
+}
+
+async function scrapeHwToken(pageUrl: string): Promise<string | null> {
+  const page = await client.get(pageUrl);
+  return page.data.match(/id="hwonttoken" value="(.*?)"/i)?.[1] ?? null;
+}
+
 function getAppIcon() {
   const names = ['icon.ico', 'icon.png'];
   const roots = app.isPackaged
@@ -82,23 +150,31 @@ app.whenReady().then(createWindow);
 // ==========================================
 // 1. LOGIN
 // ==========================================
-ipcMain.handle('router:login', async (event, credentials) => {
+ipcMain.handle('router:login', async (_event, credentials) => {
   try {
-    const routerIP = 'https://192.168.100.1';
-    const tokenResponse = await client.get(`${routerIP}/asp/GetRandCount.asp`);
+    resetRouterSession();
+
+    const tokenResponse = await client.get(`${ROUTER_IP}/asp/GetRandCount.asp`);
     const csrfToken = tokenResponse.data.match(/[a-f0-9]{64}/i)?.[0];
-    if (!csrfToken) return { success: false, message: "Failed to find security token." };
+    if (!csrfToken) return { success: false, message: 'Failed to reach the router.' };
 
-    const loginResponse = await client.post(`${routerIP}/login.cgi`, new URLSearchParams({
-      UserName: credentials.user,
-      PassWord: Buffer.from(credentials.pass).toString('base64'),
-      Language: 'english',
-      'x.X_HW_Token': csrfToken
-    }).toString());
+    const loginResponse = await client.post(
+      `${ROUTER_IP}/login.cgi`,
+      new URLSearchParams({
+        UserName: credentials.user,
+        PassWord: Buffer.from(credentials.pass).toString('base64'),
+        Language: 'english',
+        'x.X_HW_Token': csrfToken,
+      }).toString(),
+    );
 
-    const body = typeof loginResponse.data === 'string' ? loginResponse.data : '';
-    const failed = body.includes('logfail') || body.includes('Login failed');
-    if (failed) {
+    const body = responseBodyAsString(loginResponse.data);
+    if (looksLikeLoginPage(body)) {
+      resetRouterSession();
+      return { success: false, message: 'Invalid username or password.' };
+    }
+
+    if (!(await verifyRouterSession())) {
       resetRouterSession();
       return { success: false, message: 'Invalid username or password.' };
     }
@@ -119,12 +195,18 @@ ipcMain.handle('router:logout', async () => {
 // 2. GET DEVICES (DIAGNOSTIC FIX)
 // ==========================================
 ipcMain.handle('router:getDevices', async () => {
+  const sessionErr = await ensureRouterSession();
+  if (sessionErr) return sessionErr;
+
   try {
-    const routerIP = 'https://192.168.100.1';
     console.log('Fetching device data from hidden API...');
 
-    const response = await client.post(`${routerIP}/html/bbsp/common/GetLanUserDevInfo.asp`);
+    const response = await client.post(SESSION_PROBE_URL);
     const rawData = response.data;
+    const rawText = responseBodyAsString(rawData);
+    if (!looksLikeAuthenticatedSession(rawText)) {
+      return notAuthenticatedResponse();
+    }
     const devices: any[] = [];
     const deviceBlocks = rawData.matchAll(/new USERDevice(?:New)?\((.*?)\)/g);
 
@@ -161,66 +243,353 @@ ipcMain.handle('router:getDevices', async () => {
 
     return { success: true, data: uniqueDevices };
   } catch (error: any) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, message: error.message };
+  }
+});
+
+type BlockMethod = 'ipv4' | 'mac' | 'wifiMac';
+
+const WLAN_MAC_FILTER_PAGE = `${ROUTER_IP}/html/bbsp/wlanmacfilter/wlanmacfilter.asp`;
+
+function parseIpv4BlockedRules(html: string) {
+  const rules: { ruleId: string; blockedIp: string; name: string; action: string }[] = [];
+  for (const b of html.matchAll(/new stFilterIn\(([\s\S]*?)\)/g)) {
+    const decoded = decodeHexEscapes(b[1]);
+    const parts = [...decoded.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    if (parts.length < 9) continue;
+    const ruleId = parts[0];
+    const blockedIp = parts[4] || parts[5];
+    if (!ruleId.includes('IpFilterIn') || !blockedIp) continue;
+    if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(blockedIp)) continue;
+    rules.push({
+      ruleId,
+      blockedIp,
+      name: parts[13] ?? '',
+      action: parts[8] ?? '',
+    });
+  }
+  return rules;
+}
+
+function parseMacBlockedRules(html: string) {
+  const rules: { ruleId: string; blockedMac: string; deviceAlias: string }[] = [];
+  for (const b of html.matchAll(/new stMacFilter\(([\s\S]*?)\)/g)) {
+    const decoded = decodeHexEscapes(b[1]);
+    const parts = [...decoded.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    if (parts.length < 2) continue;
+    const ruleId = parts[0];
+    const blockedMac = normalizeMac(parts[1]);
+    const deviceAlias = parts[2] ?? '';
+    if (ruleId.includes('MacFilter') && !ruleId.includes('WLANMacFilter') && blockedMac) {
+      rules.push({ ruleId, blockedMac, deviceAlias });
+    }
+  }
+  return rules;
+}
+
+function parseIpv4FilterSettings(html: string) {
+  const match = html.match(/new stPortFilter\(([\s\S]*?)\)/);
+  if (!match) return { enabled: false, policy: 0 };
+  const parts = [...decodeHexEscapes(match[1]).matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  return {
+    enabled: parts[1] === '1',
+    policy: parseInt(parts[2] ?? '0', 10),
+  };
+}
+
+function parseMacFilterSettings(html: string) {
+  const enabled = html.match(/var enableFilter = '(\d)'/)?.[1] === '1';
+  const policy = parseInt(html.match(/var Mode = '(\d)'/)?.[1] ?? '0', 10);
+  return { enabled, policy };
+}
+
+function parseWlanMacBlockedRules(html: string) {
+  const rules: {
+    ruleId: string;
+    blockedMac: string;
+    deviceAlias: string;
+    ssidName: string;
+  }[] = [];
+  for (const b of html.matchAll(/new stMacFilter\(([\s\S]*?)\)/g)) {
+    const decoded = decodeHexEscapes(b[1]);
+    if (!decoded.includes('WLANMacFilter')) continue;
+    const parts = [...decoded.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    if (parts.length < 4) continue;
+    const ruleId = parts[0];
+    const ssidName = parts[1];
+    const deviceAlias = parts[2] ?? '';
+    const blockedMac = normalizeMac(parts[3]);
+    if (ruleId.includes('WLANMacFilter') && blockedMac) {
+      rules.push({ ruleId, blockedMac, deviceAlias, ssidName });
+    }
+  }
+  return rules;
+}
+
+function parseWlanMacFilterSettings(html: string) {
+  const enabled = html.match(/var enableFilter = '(\d)'/)?.[1] === '1';
+  const policy = parseInt(html.match(/var Mode = '(\d)'/)?.[1] ?? '0', 10);
+  return { enabled, policy };
+}
+
+async function setIpv4FilterEnabled(enabled: boolean) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/ipincoming/set.cgi?x=InternetGatewayDevice.X_HW_Security&RequestFile=html/bbsp/ipincoming/ipincoming.asp`,
+    new URLSearchParams({
+      'x.IpFilterInRight': enabled ? '1' : '0',
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return { success: true, message: enabled ? 'IPv4 filter enabled.' : 'IPv4 filter disabled.' };
+}
+
+async function setMacFilterEnabled(enabled: boolean) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/macfilter/macfilter.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/macfilter/set.cgi?x=InternetGatewayDevice.X_HW_Security&RequestFile=html/bbsp/macfilter/macfilter.asp`,
+    new URLSearchParams({
+      'x.MacFilterRight': enabled ? '1' : '0',
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return { success: true, message: enabled ? 'MAC filter enabled.' : 'MAC filter disabled.' };
+}
+
+async function setWlanMacFilterEnabled(enabled: boolean) {
+  const token = await scrapeHwToken(WLAN_MAC_FILTER_PAGE);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/wlanmacfilter/set.cgi?x=InternetGatewayDevice.X_HW_Security&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp`,
+    new URLSearchParams({
+      'x.WlanMacFilterRight': enabled ? '1' : '0',
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return {
+    success: true,
+    message: enabled ? 'Wi‑Fi MAC filter enabled.' : 'Wi‑Fi MAC filter disabled.',
+  };
+}
+
+async function blockByIpv4(ipAddress: string, deviceAlias: string) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  const name = (deviceAlias || ipAddress).slice(0, 64);
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/ipincoming/add.cgi?x=InternetGatewayDevice.X_HW_Security.IpFilterIn&RequestFile=html/bbsp/ipincoming/ipincoming.asp`,
+    new URLSearchParams({
+      'x.Protocol': 'ALL',
+      'x.Direction': 'Bidirectional',
+      'x.Action': 'Drop',
+      'x.Priority': '1',
+      'x.Name': name,
+      'x.SourceIPStart': ipAddress,
+      'x.SourceIPEnd': ipAddress,
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return { success: true, message: 'Blocked by IPv4 filter.' };
+}
+
+async function blockByMac(macAddress: string, deviceAlias: string) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/macfilter/macfilter.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  const mac = normalizeMac(macAddress);
+  const alias = (deviceAlias || mac).slice(0, 64);
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/macfilter/add.cgi?x=InternetGatewayDevice.X_HW_Security.MacFilter&RequestFile=html/bbsp/macfilter/macfilter.asp`,
+    new URLSearchParams({
+      'x.SourceMACAddress': mac,
+      'x.DeviceAlias': alias,
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return { success: true, message: 'Blocked by MAC filter.' };
+}
+
+async function unblockByIpv4(ruleId: string) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/ipincoming/del.cgi?RequestFile=html/bbsp/ipincoming/ipincoming.asp`,
+    new URLSearchParams({ [ruleId]: '', 'x.X_HW_Token': token }).toString(),
+  );
+  return { success: true, message: 'Unblocked IPv4 filter.' };
+}
+
+async function unblockByMac(ruleId: string) {
+  const token = await scrapeHwToken(`${ROUTER_IP}/html/bbsp/macfilter/macfilter.asp`);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/macfilter/del.cgi?x=InternetGatewayDevice.X_HW_Security.MacFilter&RequestFile=html/bbsp/macfilter/macfilter.asp`,
+    new URLSearchParams({ [ruleId]: '', 'x.X_HW_Token': token }).toString(),
+  );
+  return { success: true, message: 'Unblocked MAC filter.' };
+}
+
+async function blockByWlanMac(macAddress: string, deviceAlias: string, ssidName: string) {
+  const token = await scrapeHwToken(WLAN_MAC_FILTER_PAGE);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  const mac = normalizeMac(macAddress);
+  const alias = (deviceAlias || mac).slice(0, 32);
+  const ssid = (ssidName || 'SSID-1').slice(0, 32);
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/wlanmacfilter/add.cgi?x=InternetGatewayDevice.X_HW_Security.WLANMacFilter&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp`,
+    new URLSearchParams({
+      'x.SourceMACAddress': mac,
+      'x.SSIDName': ssid,
+      'x.DeviceName': alias,
+      'x.Enable': '1',
+      'x.X_HW_Token': token,
+    }).toString(),
+  );
+  return { success: true, message: 'Blocked on Wi‑Fi MAC filter.' };
+}
+
+async function unblockByWlanMac(ruleId: string) {
+  const token = await scrapeHwToken(WLAN_MAC_FILTER_PAGE);
+  if (!token) return { success: false, message: 'Token failed' };
+
+  await client.post(
+    `${ROUTER_IP}/html/bbsp/wlanmacfilter/del.cgi?x=InternetGatewayDevice.X_HW_Security.WLANMacFilter&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp`,
+    new URLSearchParams({ [ruleId]: '', 'x.X_HW_Token': token }).toString(),
+  );
+  return { success: true, message: 'Unblocked Wi‑Fi MAC filter.' };
+}
+
+// ==========================================
+// 3. BLOCK DEVICE (IPv4 or MAC)
+// ==========================================
+ipcMain.handle(
+  'router:blockDevice',
+  async (
+    _event,
+    payload: {
+      method: BlockMethod;
+      ip?: string;
+      mac?: string;
+      alias?: string;
+      ssidName?: string;
+    },
+  ) => {
+    const sessionErr = await ensureRouterSession();
+    if (sessionErr) return sessionErr;
+
+    try {
+      if (payload.method === 'wifiMac') {
+        if (!payload.mac) return { success: false, message: 'MAC address is required.' };
+        return await blockByWlanMac(payload.mac, payload.alias ?? '', payload.ssidName ?? 'SSID-1');
+      }
+      if (payload.method === 'mac') {
+        if (!payload.mac) return { success: false, message: 'MAC address is required.' };
+        return await blockByMac(payload.mac, payload.alias ?? '');
+      }
+      if (!payload.ip) return { success: false, message: 'IP address is required.' };
+      return await blockByIpv4(payload.ip, payload.alias ?? '');
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  },
+);
+
+// ==========================================
+// 4. UNBLOCK DEVICE (IPv4 or MAC)
+// ==========================================
+ipcMain.handle(
+  'router:unblockDevice',
+  async (_event, payload: { method: BlockMethod; ruleId: string }) => {
+    const sessionErr = await ensureRouterSession();
+    if (sessionErr) return sessionErr;
+
+    try {
+      if (payload.method === 'wifiMac') return await unblockByWlanMac(payload.ruleId);
+      if (payload.method === 'mac') return await unblockByMac(payload.ruleId);
+      return await unblockByIpv4(payload.ruleId);
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  },
+);
+
+// ==========================================
+// 5. GET BLOCKED LIST (IPv4 + MAC)
+// ==========================================
+ipcMain.handle('router:getBlockedDevices', async () => {
+  const sessionErr = await ensureRouterSession();
+  if (sessionErr) return sessionErr;
+
+  try {
+    const ts = Date.now();
+    const [ipRes, macRes, wlanMacRes] = await Promise.all([
+      client.get(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp?_=${ts}`),
+      client.get(`${ROUTER_IP}/html/bbsp/macfilter/macfilter.asp?_=${ts}`),
+      client.get(`${WLAN_MAC_FILTER_PAGE}?_=${ts}`),
+    ]);
+    const ipv4Settings = parseIpv4FilterSettings(ipRes.data);
+    const macSettings = parseMacFilterSettings(macRes.data);
+    const wlanMacSettings = parseWlanMacFilterSettings(wlanMacRes.data);
+    return {
+      success: true,
+      data: {
+        ipv4: parseIpv4BlockedRules(ipRes.data),
+        mac: parseMacBlockedRules(macRes.data),
+        wifiMac: parseWlanMacBlockedRules(wlanMacRes.data),
+        settings: {
+          ipv4Enabled: ipv4Settings.enabled,
+          macEnabled: macSettings.enabled,
+          macPolicy: macSettings.policy,
+          wifiMacEnabled: wlanMacSettings.enabled,
+          wifiMacPolicy: wlanMacSettings.policy,
+        },
+      },
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message, message: error.message };
   }
 });
 
 // ==========================================
-// 3. BLOCK DEVICE
+// 5b. ENABLE / DISABLE FILTER MASTER SWITCH
 // ==========================================
-ipcMain.handle('router:blockDevice', async (event, ipAddress: string) => {
-  try {
-    const page = await client.get('https://192.168.100.1/html/bbsp/ipincoming/ipincoming.asp');
-    const token = page.data.match(/id="hwonttoken" value="(.*?)"/i)?.[1];
-    if (!token) return { success: false, message: "Token failed" };
+ipcMain.handle(
+  'router:setFilterEnabled',
+  async (_event, payload: { method: BlockMethod; enabled: boolean }) => {
+    const sessionErr = await ensureRouterSession();
+    if (sessionErr) return sessionErr;
 
-    await client.post('https://192.168.100.1/html/bbsp/ipincoming/add.cgi?x=InternetGatewayDevice.X_HW_Security.IpFilterIn&RequestFile=html/bbsp/ipincoming/ipincoming.asp', new URLSearchParams({
-      'x.Protocol': 'ALL', 'x.Direction': 'Bidirectional', 'x.Action': 'Drop', 'x.Priority': '1',
-      'x.Name': 'Blocked_' + ipAddress.replace(/\./g, '_'),
-      'x.SourceIPStart': ipAddress, 'x.SourceIPEnd': ipAddress,
-      'x.X_HW_Token': token
-    }).toString());
-    return { success: true, message: 'Blocked!' };
-  } catch (error: any) { return { success: false, message: error.message }; }
-});
-
-// ==========================================
-// 4. UNBLOCK DEVICE
-// ==========================================
-ipcMain.handle('router:unblockDevice', async (event, ruleId: string) => {
-  try {
-    const page = await client.get('https://192.168.100.1/html/bbsp/ipincoming/ipincoming.asp');
-    const token = page.data.match(/id="hwonttoken" value="(.*?)"/i)?.[1];
-    await client.post('https://192.168.100.1/html/bbsp/ipincoming/del.cgi?RequestFile=html/bbsp/ipincoming/ipincoming.asp', new URLSearchParams({ [ruleId]: '', 'x.X_HW_Token': token! }).toString());
-    return { success: true, message: 'Unblocked!' };
-  } catch (error: any) { return { success: false, message: error.message }; }
-});
-
-// ==========================================
-// 5. GET BLOCKED LIST
-// ==========================================
-ipcMain.handle('router:getBlockedDevices', async () => {
-  try {
-    const res = await client.get('https://192.168.100.1/html/bbsp/ipincoming/ipincoming.asp?_=' + Date.now());
-    const blocks = res.data.matchAll(/new stFilterIn\(([\s\S]*?)\)/g);
-    const rules: any[] = [];
-    for (const b of blocks) {
-      // Explicitly typed hex decoder
-      const decoded = b[1].replace(/\\x([0-9A-Fa-f]{2})/g, (_: string, h: string) => String.fromCharCode(parseInt(h, 16)));
-      const rule = decoded.match(/InternetGatewayDevice\.X_HW_Security\.IpFilterIn\.\d+/);
-      const ip = decoded.match(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
-      if (rule && ip) rules.push({ ruleId: rule[0], blockedIp: ip[0] });
+    try {
+      if (payload.method === 'wifiMac') return await setWlanMacFilterEnabled(payload.enabled);
+      if (payload.method === 'mac') return await setMacFilterEnabled(payload.enabled);
+      return await setIpv4FilterEnabled(payload.enabled);
+    } catch (error: any) {
+      return { success: false, message: error.message };
     }
-    return { success: true, data: rules };
-  } catch (error: any) { return { success: false, error: error.message }; }
-});
+  },
+);
 
 // ==========================================
 // 6. RESTART
 // ==========================================
 ipcMain.handle('router:restart', async () => {
+  const sessionErr = await ensureRouterSession();
+  if (sessionErr) return sessionErr;
+
   try {
-    const page = await client.get('https://192.168.100.1/html/bbsp/ipincoming/ipincoming.asp');
+    const page = await client.get(`${ROUTER_IP}/html/bbsp/ipincoming/ipincoming.asp`);
     const token = page.data.match(/id="hwonttoken" value="(.*?)"/i)?.[1];
     await client.post('https://192.168.100.1/html/ssmp/accoutcfg/set.cgi?x=InternetGatewayDevice.X_HW_DEBUG.SMP.DM.ResetBoard&RequestFile=html/bbsp/ipincoming/ipincoming.asp',
       new URLSearchParams({ 'x.X_HW_Token': token! }).toString(),
@@ -234,17 +603,19 @@ ipcMain.handle('router:restart', async () => {
 // 7. GET WIFI PASSWORDS, SSIDs & VISIBILITY
 // ==========================================
 ipcMain.handle('router:getWifiPasswords', async () => {
+  const sessionErr = await ensureRouterSession();
+  if (sessionErr) return sessionErr;
+
   try {
-    const routerIP = 'https://192.168.100.1';
     console.log('Fetching Wi-Fi data...');
 
     const timestamp = Date.now();
 
     // 1. Fetch all THREE hidden API files simultaneously!
     const [pwdRes, ssidRes, extRes] = await Promise.all([
-      client.get(`${routerIP}/html/amp/wlanbasic/simplewificfg.asp?_=${timestamp}`),
-      client.get(`${routerIP}/html/amp/common/wlan_list.asp?_=${timestamp}`),
-      client.get(`${routerIP}/html/amp/common/wlan_extended.asp?_=${timestamp}`) // The new file!
+      client.get(`${ROUTER_IP}/html/amp/wlanbasic/simplewificfg.asp?_=${timestamp}`),
+      client.get(`${ROUTER_IP}/html/amp/common/wlan_list.asp?_=${timestamp}`),
+      client.get(`${ROUTER_IP}/html/amp/common/wlan_extended.asp?_=${timestamp}`),
     ]);
 
     // Explicitly typed hex decoder
@@ -316,9 +687,12 @@ ipcMain.handle('router:getWifiPasswords', async () => {
 // ==========================================
 // 8. SAVE ALL WIFI SETTINGS (Master Function)
 // ==========================================
-ipcMain.handle('router:saveWifiSettings', async (event, networks: any[]) => {
+ipcMain.handle('router:saveWifiSettings', async (_event, networks: any[]) => {
+  const sessionErr = await ensureRouterSession();
+  if (sessionErr) return sessionErr;
+
   try {
-    const routerIP = 'https://192.168.100.1';
+    const routerIP = ROUTER_IP;
     console.log('Pushing master Wi-Fi configuration...');
 
     // 1. Grab a fresh token
